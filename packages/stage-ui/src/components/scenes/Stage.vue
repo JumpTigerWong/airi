@@ -98,6 +98,7 @@ const assistantCaption = ref('')
 type PresentEvent
   = | { type: 'assistant-reset' }
     | { type: 'assistant-append', text: string }
+    | { type: 'assistant-complete' }
 const { post: postPresent } = useBroadcastChannel<PresentEvent, PresentEvent>({ name: 'airi-chat-present' })
 
 viewUpdateCleanups.push(live2dStore.onShouldUpdateView(async () => {
@@ -497,6 +498,13 @@ chatHookCleanups.push(onStreamEnd(async () => {
 }))
 
 chatHookCleanups.push(onAssistantResponseEnd(async (_message) => {
+  try {
+    postPresent({ type: 'assistant-complete' })
+  }
+  catch (error) {
+    console.warn('[Stage] Failed to post present completion (channel may be closed)', { error })
+  }
+
   currentChatIntent?.end()
   currentChatIntent = null
   // const res = await embed({
