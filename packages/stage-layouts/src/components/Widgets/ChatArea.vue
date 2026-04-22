@@ -479,11 +479,15 @@ watch(sendMode, () => {
         text="primary-600 dark:primary-100  placeholder:primary-500 dark:placeholder:primary-200"
         bg="transparent"
         min-h="[72px]" max-h="[220px]" w-full
-        rounded="[28px]" px-5 pt-4 font-medium pb="[60px]"
+        rounded="[28px]"
         outline-none transition="all duration-250 ease-in-out placeholder:all placeholder:duration-250 placeholder:ease-in-out"
-        :class="{
-          'transition-colors-none placeholder:transition-colors-none': themeColorsHueDynamic,
-        }"
+        :class="[
+          'px-5 pt-6 pb-[60px]',
+          'font-medium leading-6',
+          {
+            'transition-colors-none placeholder:transition-colors-none': themeColorsHueDynamic,
+          },
+        ]"
         @keydown="handleMessageInputKeydown"
         @compositionstart="isComposing = true"
         @compositionend="isComposing = false"

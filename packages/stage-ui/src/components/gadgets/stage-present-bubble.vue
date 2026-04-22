@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useBroadcastChannel, useEventListener, useLocalStorage } from '@vueuse/core'
+import { useBroadcastChannel } from '@vueuse/core'
 import { computed, onUnmounted, ref, watch } from 'vue'
 
 import ChatBubbleMinimalism from './chat-bubble-minimalism.vue'
@@ -8,120 +8,39 @@ type PresentEvent
   = | { type: 'assistant-reset' }
     | { type: 'assistant-append', text: string }
 
-withDefaults(defineProps<{
-  side?: 'left' | 'right'
-}>(), {
-  side: 'left',
-})
+/**
+ * Keeps the bubble mirrored around the character center line so replies can
+ * appear on either side while still pointing back toward the character.
+ */
+const mirroredOffsetPx = 246
+const BUBBLE_IDLE_HIDE_DELAY_MS = 20000
 
 const text = ref('')
 const isVisible = ref(false)
 const isLoading = ref(false)
 const bubbleKey = ref(0)
+const placementSide = ref<'left' | 'right'>(Math.random() > 0.5 ? 'left' : 'right')
+
 const bubbleText = computed(() => text.value.trim())
-const bubbleRef = ref<HTMLElement>()
-const dragHandleRef = ref<HTMLElement>()
-const fixedPosition = useLocalStorage<{
-  left: number | null
-  top: number | null
-}>('stage/present-bubble/fixed-position', {
-  left: null,
-  top: null,
-})
-const isDragging = ref(false)
-const BUBBLE_IDLE_HIDE_DELAY_MS = 5000
-let hideTimer: ReturnType<typeof setTimeout> | undefined
+const bubbleTailSide = computed<'left' | 'right'>(() => placementSide.value === 'left' ? 'right' : 'left')
 
 const { data: presentEvent } = useBroadcastChannel<PresentEvent, PresentEvent>({ name: 'airi-chat-present' })
 
-const bubbleFixedStyle = computed(() => {
-  if (fixedPosition.value.left === null || fixedPosition.value.top === null)
-    return undefined
+let hideTimer: ReturnType<typeof setTimeout> | undefined
 
-  return {
-    left: `${fixedPosition.value.left}px`,
-    top: `${fixedPosition.value.top}px`,
-  }
+const bubblePositionStyle = computed(() => {
+  return placementSide.value === 'left'
+    ? {
+        right: `${mirroredOffsetPx}px`,
+        bottom: '0px',
+        position: 'absolute',
+      }
+    : {
+        left: `${mirroredOffsetPx}px`,
+        bottom: '0px',
+        position: 'absolute',
+      }
 })
-
-function ensureFixedPositionFromViewport() {
-  if (!bubbleRef.value)
-    return
-
-  if (fixedPosition.value.left !== null && fixedPosition.value.top !== null)
-    return
-
-  const rect = bubbleRef.value.getBoundingClientRect()
-  fixedPosition.value = {
-    left: rect.left,
-    top: rect.top,
-  }
-}
-
-function startDrag(event: PointerEvent) {
-  if (!bubbleRef.value)
-    return
-
-  ensureFixedPositionFromViewport()
-
-  const rect = bubbleRef.value.getBoundingClientRect()
-  const pointerOffsetX = event.clientX - rect.left
-  const pointerOffsetY = event.clientY - rect.top
-  isDragging.value = true
-
-  fixedPosition.value = {
-    left: rect.left,
-    top: rect.top,
-  }
-
-  const handlePointerMove = (moveEvent: PointerEvent) => {
-    const nextLeft = moveEvent.clientX - pointerOffsetX
-    const nextTop = moveEvent.clientY - pointerOffsetY
-
-    fixedPosition.value = {
-      left: Math.max(12, nextLeft),
-      top: Math.max(12, nextTop),
-    }
-  }
-
-  const stopDrag = () => {
-    isDragging.value = false
-    window.removeEventListener('pointermove', handlePointerMove)
-    window.removeEventListener('pointerup', stopDrag)
-    window.removeEventListener('pointercancel', stopDrag)
-  }
-
-  window.addEventListener('pointermove', handlePointerMove)
-  window.addEventListener('pointerup', stopDrag)
-  window.addEventListener('pointercancel', stopDrag)
-}
-
-useEventListener(dragHandleRef, 'pointerdown', (event) => {
-  event.preventDefault()
-  startDrag(event)
-})
-
-function resetBubble() {
-  clearHideTimer()
-  text.value = ''
-  isVisible.value = true
-  isLoading.value = true
-  bubbleKey.value++
-}
-
-function appendToBubble(nextText: string) {
-  if (!nextText)
-    return
-
-  isVisible.value = true
-  isLoading.value = false
-  if (!text.value)
-    text.value = nextText
-  else
-    text.value += nextText
-
-  scheduleHide()
-}
 
 function clearHideTimer() {
   if (!hideTimer)
@@ -138,6 +57,25 @@ function scheduleHide() {
   }, BUBBLE_IDLE_HIDE_DELAY_MS)
 }
 
+function resetBubble() {
+  clearHideTimer()
+  placementSide.value = Math.random() > 0.5 ? 'left' : 'right'
+  text.value = ''
+  isVisible.value = true
+  isLoading.value = true
+  bubbleKey.value++
+}
+
+function appendToBubble(nextText: string) {
+  if (!nextText)
+    return
+
+  isVisible.value = true
+  isLoading.value = false
+  text.value += nextText
+  scheduleHide()
+}
+
 watch(presentEvent, (event) => {
   if (!event)
     return
@@ -149,15 +87,6 @@ watch(presentEvent, (event) => {
 
   if (event.type === 'assistant-append')
     appendToBubble(event.text)
-}, { immediate: true })
-
-watch(isVisible, (visible) => {
-  if (!visible)
-    return
-
-  requestAnimationFrame(() => {
-    ensureFixedPositionFromViewport()
-  })
 }, { immediate: true })
 
 onUnmounted(() => {
@@ -173,33 +102,18 @@ onUnmounted(() => {
     leave-to-class="opacity-0"
   >
     <div
-      v-if="isVisible"
-      ref="bubbleRef"
-      :style="bubbleFixedStyle"
+      v-if="isVisible && (isLoading || bubbleText)"
+      :style="bubblePositionStyle"
       :class="[
-        'group pointer-events-auto flex w-fit max-w-[min(24rem,calc(100vw-2rem))] flex-col items-start select-none',
-        bubbleFixedStyle ? 'fixed z-20' : '',
-        isDragging ? 'z-20' : '',
+        'pointer-events-none absolute z-20 flex max-w-[min(28rem,calc(100vw-2rem))] flex-col',
       ]"
     >
-      <div
-        ref="dragHandleRef"
-        :class="[
-          'mb-1 inline-flex items-center gap-2 rounded-full border border-white/12 bg-black/35 px-2.5 py-1 text-[11px] text-white/75 backdrop-blur-md',
-          'opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100',
-          isDragging ? 'opacity-100' : '',
-          'cursor-grab active:cursor-grabbing',
-        ]"
-      >
-        <div class="i-solar:drag-horizontal-linear h-3.5 w-3.5" />
-        <span>Drag</span>
-      </div>
       <div class="w-[min(24rem,calc(100vw-2rem))]">
         <ChatBubbleMinimalism
           :key="bubbleKey"
           :text="bubbleText"
           :loading="isLoading"
-          :side="side"
+          :side="bubbleTailSide"
           :container-class="[
             'w-fit max-w-full',
           ]"

@@ -175,10 +175,10 @@ watch([stream, () => vadLoaded.value], async ([s, loaded]) => {
             :scale="scale"
           />
           <div
-            pointer-events-none absolute z-10 px-4
-            :class="isMobile ? 'left-3 right-18 bottom-28' : 'left-[calc(50%+7.5rem)] top-[26%] w-[min(20rem,24vw)]'"
+            pointer-events-none absolute z-10
+            :class="isMobile ? 'left-3 right-18 bottom-28' : 'left-1/2 top-[18%] w-0 -translate-x-1/2 translate-y-[200px]'"
           >
-            <StagePresentBubble side="right" />
+            <StagePresentBubble />
           </div>
         </div>
         <InteractiveArea />
