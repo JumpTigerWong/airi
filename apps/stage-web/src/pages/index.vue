@@ -4,13 +4,12 @@ import type { ChatProvider } from '@xsai-ext/providers/utils'
 import Header from '@proj-airi/stage-layouts/components/Layouts/Header.vue'
 import InteractiveArea from '@proj-airi/stage-layouts/components/Layouts/InteractiveArea.vue'
 import MobileHeader from '@proj-airi/stage-layouts/components/Layouts/MobileHeader.vue'
-import MobileInteractiveArea from '@proj-airi/stage-layouts/components/Layouts/MobileInteractiveArea.vue'
 import workletUrl from '@proj-airi/stage-ui/workers/vad/process.worklet?worker&url'
 
 import { BackgroundProvider } from '@proj-airi/stage-layouts/components/Backgrounds'
 import { useBackgroundThemeColor } from '@proj-airi/stage-layouts/composables/theme-color'
 import { useBackgroundStore } from '@proj-airi/stage-layouts/stores/background'
-import { HoloCoupon } from '@proj-airi/stage-ui/components'
+import { HoloCoupon, StagePresentBubble } from '@proj-airi/stage-ui/components'
 import { WidgetStage } from '@proj-airi/stage-ui/components/scenes'
 import { useAudioRecorder } from '@proj-airi/stage-ui/composables/audio/audio-recorder'
 import { useVAD } from '@proj-airi/stage-ui/stores/ai/models/vad'
@@ -26,14 +25,11 @@ import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vu
 
 const paused = ref(false)
 
-function handleSettingsOpen(open: boolean) {
-  paused.value = open
-}
-
 const positionCursor = useMouse()
 const { scale, position, positionInPercentageString } = storeToRefs(useLive2d())
 const breakpoints = useBreakpoints(breakpointsTailwind)
 const isMobile = breakpoints.smaller('md')
+const stageXOffset = computed(() => (isMobile.value ? `${position.value.x}%` : '0%'))
 
 const backgroundStore = useBackgroundStore()
 const { selectedOption, sampledColor } = storeToRefs(backgroundStore)
@@ -165,20 +161,27 @@ watch([stream, () => vadLoaded.value], async ([s, loaded]) => {
         <MobileHeader class="flex md:hidden" />
       </div>
       <!-- page -->
-      <div relative flex="~ 1 row gap-y-0 gap-x-2 <md:col">
-        <WidgetStage
-          flex-1 min-w="1/2"
-          :paused="paused"
-          :focus-at="{
-            x: positionCursor.x.value,
-            y: positionCursor.y.value,
-          }"
-          :x-offset="`${isMobile ? position.x : position.x - 10}%`"
-          :y-offset="positionInPercentageString.y"
-          :scale="scale"
-        />
-        <InteractiveArea v-if="!isMobile" h="85dvh" absolute right-4 flex flex-1 flex-col max-w="500px" min-w="30%" />
-        <MobileInteractiveArea v-if="isMobile" @settings-open="handleSettingsOpen" />
+      <div relative flex-1>
+        <div relative h-full w-full>
+          <WidgetStage
+            h-full w-full
+            :paused="paused"
+            :focus-at="{
+              x: positionCursor.x.value,
+              y: positionCursor.y.value,
+            }"
+            :x-offset="stageXOffset"
+            :y-offset="positionInPercentageString.y"
+            :scale="scale"
+          />
+          <div
+            pointer-events-none absolute z-10 px-4
+            :class="isMobile ? 'left-3 right-18 bottom-28' : 'left-[calc(50%+7.5rem)] top-[26%] w-[min(20rem,24vw)]'"
+          >
+            <StagePresentBubble side="right" />
+          </div>
+        </div>
+        <InteractiveArea />
       </div>
       <HoloCoupon />
     </div>

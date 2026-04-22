@@ -20,6 +20,16 @@ import { useI18n } from 'vue-i18n'
 
 import IndicatorMicVolume from './IndicatorMicVolume.vue'
 
+const props = withDefaults(defineProps<{
+  detailsExpanded?: boolean
+}>(), {
+  detailsExpanded: false,
+})
+
+const emit = defineEmits<{
+  (e: 'toggleDetails'): void
+}>()
+
 const messageInput = ref('')
 const hearingPopoverOpen = ref(false)
 const isComposing = ref(false)
@@ -454,12 +464,12 @@ watch(sendMode, () => {
 </script>
 
 <template>
-  <div h="<md:full" flex gap-2 class="ph-no-capture">
+  <div class="ph-no-capture relative w-full flex items-end justify-center">
     <div
       :class="[
         'relative',
         'w-full',
-        'bg-primary-200/20 dark:bg-primary-400/20',
+        'rounded-[28px] border border-white/10 bg-black/20 backdrop-blur-md',
       ]"
     >
       <BasicTextarea
@@ -468,8 +478,8 @@ watch(sendMode, () => {
         :placeholder="t('stage.message')"
         text="primary-600 dark:primary-100  placeholder:primary-500 dark:placeholder:primary-200"
         bg="transparent"
-        min-h="[100px]" max-h="[300px]" w-full
-        rounded-t-xl p-4 font-medium pb="[60px]"
+        min-h="[72px]" max-h="[220px]" w-full
+        rounded="[28px]" px-5 pt-4 font-medium pb="[60px]"
         outline-none transition="all duration-250 ease-in-out placeholder:all placeholder:duration-250 placeholder:ease-in-out"
         :class="{
           'transition-colors-none placeholder:transition-colors-none': themeColorsHueDynamic,
@@ -595,5 +605,12 @@ watch(sendMode, () => {
         </PopoverRoot>
       </div>
     </div>
+
+    <button
+      class="absolute bottom-2 left-[calc(100%+0.75rem)] shrink-0 border border-white/10 rounded-full bg-black/20 px-4 py-3 text-xs text-neutral-100 backdrop-blur-md transition-colors duration-200 hover:bg-white/14"
+      @click="emit('toggleDetails')"
+    >
+      {{ props.detailsExpanded ? 'Collapse Details' : 'Expand Details' }}
+    </button>
   </div>
 </template>

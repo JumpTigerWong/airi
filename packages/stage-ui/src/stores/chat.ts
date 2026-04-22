@@ -16,7 +16,7 @@ import { useLlmmarkerParser } from '../composables/llm-marker-parser'
 import { categorizeResponse, createStreamingCategorizer } from '../composables/response-categoriser'
 import { activeTurnSpan, startSpan } from '../composables/use-io-tracer'
 import { formatContextPromptText } from './chat/context-prompt'
-import { createDatetimeContext, createMinecraftContext } from './chat/context-providers'
+import { createMinecraftContext } from './chat/context-providers'
 import { useChatContextStore } from './chat/context-store'
 import { createChatHooks } from './chat/hooks'
 import { useChatSessionStore } from './chat/session-store'
@@ -132,8 +132,6 @@ export const useChatOrchestratorStore = defineStore('chat-orchestrator', () => {
 
     chatSession.ensureSession(sessionId)
 
-    // Inject current datetime context before composing the message
-    chatContext.ingestContextMessage(createDatetimeContext())
     const minecraftContext = createMinecraftContext()
     if (minecraftContext)
       chatContext.ingestContextMessage(minecraftContext)

@@ -352,12 +352,6 @@ playbackManager.onStart(({ item }) => {
   catch {
     // BroadcastChannel may be closed - don't break playback
   }
-  try {
-    postPresent({ type: 'assistant-append', text: item.text })
-  }
-  catch {
-    // BroadcastChannel may be closed - don't break playback
-  }
 })
 
 function startLipSyncLoop() {
@@ -484,6 +478,12 @@ chatHookCleanups.push(onBeforeSend(async () => {
 
 chatHookCleanups.push(onTokenLiteral(async (literal) => {
   currentChatIntent?.writeLiteral(literal)
+  try {
+    postPresent({ type: 'assistant-append', text: literal })
+  }
+  catch (error) {
+    console.warn('[Stage] Failed to post present append (channel may be closed)', { error })
+  }
 }))
 
 chatHookCleanups.push(onTokenSpecial(async (special) => {
@@ -574,7 +574,7 @@ defineExpose({
         v-if="stageModelRenderer === 'live2d' && showStage"
         ref="live2dSceneRef"
         v-model:state="componentState"
-        min-w="50% <lg:full" min-h="100 sm:100"
+        min-h="100 sm:100"
         h-full w-full flex-1
         :model-src="stageModelSelectedUrl"
         :model-id="stageModelSelected"
@@ -599,7 +599,7 @@ defineExpose({
         v-if="stageModelRenderer === 'vrm' && showStage"
         ref="vrmViewerRef"
         v-model:state="componentState"
-        min-w="50% <lg:full" min-h="100 sm:100" h-full w-full flex-1
+        min-h="100 sm:100" h-full w-full flex-1
         :model-src="stageModelSelectedUrl"
         :idle-animation="animations.idleLoop.toString()"
         :paused="paused"
