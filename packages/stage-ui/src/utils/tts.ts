@@ -7,6 +7,21 @@ export const TTS_FLUSH_INSTRUCTION = '\u200B'
 // This is for special literals
 export const TTS_SPECIAL_TOKEN = '\u2063'
 
+const leadingSentenceOpeners = new Set(['"', '\'', '“', '‘', '（', '【', '《', '「', '『'])
+const trailingSentenceClosers = new Set([
+  '"',
+  '\'',
+  ')',
+  ']',
+  '}',
+  '\u201D',
+  '\u2019',
+  '\uFF09',
+  '\u3011',
+  '\u300B',
+  '\u300D',
+  '\u300F',
+])
 const keptPunctuations = new Set('?？!！')
 const hardPunctuations = new Set('.。?？!！…⋯～~\n\t\r')
 const softPunctuations = new Set(',，、–—:：;；《》「」')
@@ -27,6 +42,23 @@ export interface TTSInputChunkOptions {
 export interface TTSChunkItem {
   chunk: string
   special: string | null
+}
+
+function takeTrailingSentenceClosers(
+  iterator: AsyncIterator<string>,
+  initialCurrent: IteratorResult<string, any> | undefined,
+): Promise<{ suffix: string, nextCurrent: IteratorResult<string, any> | undefined }> {
+  return (async () => {
+    let suffix = ''
+    let nextCurrent = initialCurrent
+
+    while (nextCurrent && !nextCurrent.done && trailingSentenceClosers.has(nextCurrent.value)) {
+      suffix += nextCurrent.value
+      nextCurrent = await iterator.next()
+    }
+
+    return { suffix, nextCurrent }
+  })()
 }
 
 /**
@@ -72,6 +104,7 @@ export async function* chunkTTSInput(
 
   while (!current.done) {
     let value = current.value
+    let nextCurrentAfterTrailingClosers: IteratorResult<string, any> | undefined
 
     if (value.length > 1) {
       previousValue = value
@@ -172,7 +205,15 @@ export async function* chunkTTSInput(
         chunkWordsCount = 0
       }
       else if (flush || hard || chunkWordsCount > maximumWords || yieldCount < boost) {
-        const text = chunk.trim()
+        let trailingCloserSuffix = ''
+
+        if (hard || flush) {
+          const trailingClosers = await takeTrailingSentenceClosers(iterator, await iterator.next())
+          trailingCloserSuffix = trailingClosers.suffix
+          nextCurrentAfterTrailingClosers = trailingClosers.nextCurrent
+        }
+
+        const text = `${chunk}${trailingCloserSuffix}`.trim()
         yield {
           text,
           words: chunkWordsCount,
@@ -208,8 +249,11 @@ export async function* chunkTTSInput(
         }
       }
       else {
-        // No next nor afterNext, so run `iterator.next()`
-        current = await iterator.next()
+        // No next nor afterNext, so resume from any trailing closer scan result.
+        if (nextCurrentAfterTrailingClosers !== undefined)
+          current = nextCurrentAfterTrailingClosers
+        else
+          current = await iterator.next()
       }
       // No need to do anything with buffer, just jump to the next loop
       continue
@@ -239,25 +283,69 @@ export async function chunkEmitter(
   pendingSpecials: string[],
   handler: (ttsSegment: TTSChunkItem) => Promise<void> | void,
 ) {
+  const isOnlyFromSet = (text: string, set: Set<string>) => {
+    const normalizedText = text.trim()
+    return normalizedText.length > 0 && [...normalizedText].every(character => set.has(character))
+  }
+
   const sanitizeChunk = (text: string) =>
     text
       .replaceAll(TTS_SPECIAL_TOKEN, '')
       .replaceAll(TTS_FLUSH_INSTRUCTION, '')
-      .trim()
+
+  let pendingLeadingOpeners = ''
+  let bufferedChunk: TTSChunkItem | null = null
+
+  const flushBufferedChunk = async () => {
+    if (!bufferedChunk)
+      return
+
+    await handler(bufferedChunk)
+    bufferedChunk = null
+  }
 
   try {
     for await (const chunk of chunkTTSInput(reader)) {
-      // TODO: remove later
-
       if (chunk.reason === 'special') {
+        await flushBufferedChunk()
         const specialToken = pendingSpecials.shift()
-        // console.debug("special yield:", specialToken)
         await handler({ chunk: sanitizeChunk(chunk.text), special: specialToken ?? null })
       }
       else {
-        await handler({ chunk: sanitizeChunk(chunk.text), special: null } as TTSChunkItem)
+        const sanitizedChunkText = sanitizeChunk(chunk.text)
+        const normalizedChunkText = sanitizedChunkText.trim()
+        if (!normalizedChunkText)
+          continue
+
+        if (isOnlyFromSet(normalizedChunkText, leadingSentenceOpeners)) {
+          pendingLeadingOpeners += normalizedChunkText
+          continue
+        }
+
+        if (isOnlyFromSet(normalizedChunkText, trailingSentenceClosers) && bufferedChunk) {
+          bufferedChunk = { chunk: `${bufferedChunk.chunk}${normalizedChunkText}`, special: bufferedChunk.special }
+          continue
+        }
+
+        if (isOnlyFromSet(normalizedChunkText, trailingSentenceClosers) && !bufferedChunk) {
+          pendingLeadingOpeners += normalizedChunkText
+          continue
+        }
+
+        const mergedChunkText = `${pendingLeadingOpeners}${sanitizedChunkText}`
+        pendingLeadingOpeners = ''
+
+        await flushBufferedChunk()
+        bufferedChunk = { chunk: mergedChunkText, special: null } as TTSChunkItem
       }
     }
+
+    if (pendingLeadingOpeners && bufferedChunk) {
+      bufferedChunk = { chunk: `${bufferedChunk.chunk}${pendingLeadingOpeners}`, special: bufferedChunk.special }
+      pendingLeadingOpeners = ''
+    }
+
+    await flushBufferedChunk()
   }
   catch (e) {
     console.error('Error chunking stream to TTS queue:', e)

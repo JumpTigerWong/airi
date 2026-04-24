@@ -97,9 +97,22 @@ const assistantCaption = ref('')
 
 type PresentEvent
   = | { type: 'assistant-reset' }
-    | { type: 'assistant-append', text: string }
+    | { type: 'assistant-append', text: string, mode: 'stream-sentence' }
+    | { type: 'assistant-show-chunk', text: string }
+    | { type: 'assistant-append-current-chunk', text: string }
+    | { type: 'assistant-hide-chunk' }
     | { type: 'assistant-complete' }
 const { post: postPresent } = useBroadcastChannel<PresentEvent, PresentEvent>({ name: 'airi-chat-present' })
+
+const speechLeadingOpeners = new Set(['"', '\'', '“', '‘', '（', '【', '《', '「', '『', '〔'])
+const speechTrailingClosers = new Set(['"', '\'', ')', ']', '}', '”', '’', '）', '】', '》', '」', '』', '〕'])
+const speechQuoteLikeCharacters = new Set([...speechLeadingOpeners, ...speechTrailingClosers])
+
+function isStandaloneQuoteLikeChunk(text: string) {
+  const normalizedText = text.trim()
+  return normalizedText.length > 0
+    && [...normalizedText].every(character => speechQuoteLikeCharacters.has(character))
+}
 
 viewUpdateCleanups.push(live2dStore.onShouldUpdateView(async () => {
   showStage.value = false
@@ -118,7 +131,7 @@ const live2dLipSyncOptions: Live2DLipSyncOptions = { mouthUpdateIntervalMs: 50, 
 
 const { activeCard } = storeToRefs(useAiriCardStore())
 const speechStore = useSpeechStore()
-const { ssmlEnabled, activeSpeechProvider, activeSpeechModel, activeSpeechVoice, pitch } = storeToRefs(speechStore)
+const { configured: speechConfigured, ssmlEnabled, activeSpeechProvider, activeSpeechModel, activeSpeechVoice, pitch } = storeToRefs(speechStore)
 const activeCardId = computed(() => activeCard.value?.name ?? 'default')
 const speechRuntimeStore = useSpeechRuntimeStore()
 
@@ -233,6 +246,83 @@ const playbackManager = createPlaybackManager<AudioBuffer>({
   ownerOverflowPolicy: 'steal-oldest',
 })
 
+let currentPresentIntentId: string | null = null
+let presentIntentEnded = false
+let presentOutstandingPlaybackItems = 0
+let presentPendingChunkTextBySegmentId = new Map<string, string>()
+let pendingSpeechDisplayLeadingOpeners = ''
+let lastShownSpeechSegmentId: string | null = null
+
+function isSpeechLeadingOpenersOnly(text: string) {
+  const normalizedText = text.trim()
+  return normalizedText.length > 0
+    && [...normalizedText].every(character => speechLeadingOpeners.has(character))
+}
+
+function isSpeechTrailingClosersOnly(text: string) {
+  const normalizedText = text.trim()
+  return normalizedText.length > 0
+    && [...normalizedText].every(character => speechTrailingClosers.has(character))
+}
+
+function appendSpeechCaptionChunk(text: string) {
+  const normalizedText = text.trim()
+  if (!normalizedText)
+    return
+
+  if (isSpeechLeadingOpenersOnly(normalizedText)) {
+    pendingSpeechDisplayLeadingOpeners += normalizedText
+    return
+  }
+
+  if (isSpeechTrailingClosersOnly(normalizedText)) {
+    assistantCaption.value += normalizedText
+    return
+  }
+
+  const mergedText = `${pendingSpeechDisplayLeadingOpeners}${normalizedText}`.trim()
+  pendingSpeechDisplayLeadingOpeners = ''
+
+  if (!assistantCaption.value) {
+    assistantCaption.value = mergedText
+    return
+  }
+
+  assistantCaption.value += ` ${mergedText}`
+}
+
+function shouldSyncPresentBubbleWithPlayback() {
+  return speechConfigured.value
+}
+
+function resetPresentBubblePlaybackTracking(intentId: string | null) {
+  currentPresentIntentId = intentId
+  presentIntentEnded = false
+  presentOutstandingPlaybackItems = 0
+  presentPendingChunkTextBySegmentId = new Map()
+  pendingSpeechDisplayLeadingOpeners = ''
+  lastShownSpeechSegmentId = null
+}
+
+function completePresentBubbleAfterPlaybackSettles() {
+  if (!presentIntentEnded || presentOutstandingPlaybackItems !== 0)
+    return
+
+  try {
+    postPresent({ type: 'assistant-complete' })
+  }
+  catch (error) {
+    console.warn('[Stage] Failed to post present completion after playback settled (channel may be closed)', { error })
+  }
+}
+
+function decrementPresentBubblePlaybackItems() {
+  if (presentOutstandingPlaybackItems > 0)
+    presentOutstandingPlaybackItems -= 1
+
+  completePresentBubbleAfterPlaybackSettles()
+}
+
 const speechPipeline = createSpeechPipeline<AudioBuffer>({
   tts: async (request, signal) => {
     if (signal.aborted)
@@ -250,7 +340,11 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
       return null
     }
 
-    if (!request.text && !request.special)
+    const normalizedSpeechText = request.text
+    if (!normalizedSpeechText.trim() && !request.special)
+      return null
+
+    if (isStandaloneQuoteLikeChunk(normalizedSpeechText))
       return null
 
     const providerConfig = providersStore.getProviderConfig(activeSpeechProvider.value)
@@ -301,8 +395,8 @@ const speechPipeline = createSpeechPipeline<AudioBuffer>({
       return null
 
     const input = ssmlEnabled.value
-      ? speechStore.generateSSML(request.text, voice, { ...providerConfig, pitch: pitch.value })
-      : request.text
+      ? speechStore.generateSSML(normalizedSpeechText, voice, { ...providerConfig, pitch: pitch.value })
+      : normalizedSpeechText
 
     try {
       const res = await generateSpeech({
@@ -333,12 +427,120 @@ speechPipeline.on('onSpecial', (segment) => {
     playSpecialToken(segment.special)
 })
 
+speechPipeline.on('onTtsRequest', (request) => {
+  if (!shouldSyncPresentBubbleWithPlayback())
+    return
+
+  if (request.intentId !== currentPresentIntentId)
+    return
+
+  const normalizedText = request.text.trim()
+  if (!normalizedText || !isStandaloneQuoteLikeChunk(normalizedText))
+    return
+
+  if (isSpeechLeadingOpenersOnly(normalizedText)) {
+    pendingSpeechDisplayLeadingOpeners += normalizedText
+    return
+  }
+
+  if (!lastShownSpeechSegmentId)
+    return
+
+  if (isSpeechTrailingClosersOnly(normalizedText)) {
+    appendSpeechCaptionChunk(normalizedText)
+    try {
+      postCaption({ type: 'caption-assistant', text: assistantCaption.value })
+    }
+    catch {
+      // BroadcastChannel may be closed - don't break playback
+    }
+
+    try {
+      postPresent({ type: 'assistant-append-current-chunk', text: normalizedText })
+    }
+    catch (error) {
+      console.warn('[Stage] Failed to append standalone quote chunk to present bubble (channel may be closed)', { error })
+    }
+  }
+})
+
+speechPipeline.on('onTtsResult', (result) => {
+  if (!shouldSyncPresentBubbleWithPlayback())
+    return
+
+  if (result.intentId !== currentPresentIntentId)
+    return
+
+  presentOutstandingPlaybackItems += 1
+  presentPendingChunkTextBySegmentId.set(result.segmentId, result.text)
+})
+
+speechPipeline.on('onIntentEnd', (intentId) => {
+  if (!shouldSyncPresentBubbleWithPlayback())
+    return
+
+  if (intentId !== currentPresentIntentId)
+    return
+
+  presentIntentEnded = true
+  completePresentBubbleAfterPlaybackSettles()
+})
+
 playbackManager.onEnd(({ item }) => {
   if (item.special)
     playSpecialToken(item.special)
 
   nowSpeaking.value = false
   mouthOpenSize.value = 0
+
+  if (!shouldSyncPresentBubbleWithPlayback())
+    return
+
+  if (item.intentId !== currentPresentIntentId)
+    return
+
+  try {
+    postPresent({ type: 'assistant-hide-chunk' })
+  }
+  catch (error) {
+    console.warn('[Stage] Failed to post present hide chunk on playback end (channel may be closed)', { error })
+  }
+
+  decrementPresentBubblePlaybackItems()
+})
+
+playbackManager.onInterrupt(({ item }) => {
+  if (!shouldSyncPresentBubbleWithPlayback())
+    return
+
+  if (item.intentId !== currentPresentIntentId)
+    return
+
+  try {
+    postPresent({ type: 'assistant-hide-chunk' })
+  }
+  catch (error) {
+    console.warn('[Stage] Failed to post present hide chunk on playback interrupt (channel may be closed)', { error })
+  }
+
+  decrementPresentBubblePlaybackItems()
+})
+
+playbackManager.onReject(({ item }) => {
+  if (!shouldSyncPresentBubbleWithPlayback())
+    return
+
+  if (item.intentId !== currentPresentIntentId)
+    return
+
+  try {
+    postPresent({ type: 'assistant-hide-chunk' })
+  }
+  catch (error) {
+    console.warn('[Stage] Failed to post present hide chunk on playback reject (channel may be closed)', { error })
+  }
+
+  decrementPresentBubblePlaybackItems()
 })
 
 playbackManager.onStart(({ item }) => {
@@ -346,12 +548,31 @@ playbackManager.onStart(({ item }) => {
   // NOTICE: postCaption and postPresent may throw errors if the BroadcastChannel is closed
   // (e.g., when navigating away from the page). We wrap these in try-catch to prevent
   // breaking playback when the channel is unavailable.
-  assistantCaption.value += ` ${item.text}`
+  appendSpeechCaptionChunk(item.text)
   try {
     postCaption({ type: 'caption-assistant', text: assistantCaption.value })
   }
   catch {
     // BroadcastChannel may be closed - don't break playback
+  }
+
+  if (!shouldSyncPresentBubbleWithPlayback())
+    return
+
+  if (item.intentId !== currentPresentIntentId)
+    return
+
+  const chunkText = presentPendingChunkTextBySegmentId.get(item.segmentId) ?? item.text
+  presentPendingChunkTextBySegmentId.delete(item.segmentId)
+  const mergedChunkText = `${pendingSpeechDisplayLeadingOpeners}${chunkText}`
+  pendingSpeechDisplayLeadingOpeners = ''
+  lastShownSpeechSegmentId = item.segmentId
+
+  try {
+    postPresent({ type: 'assistant-show-chunk', text: mergedChunkText })
+  }
+  catch (error) {
+    console.warn('[Stage] Failed to post present show chunk on playback start (channel may be closed)', { error })
   }
 })
 
@@ -471,6 +692,7 @@ chatHookCleanups.push(onBeforeMessageComposed(async () => {
     priority: 'normal',
     behavior: 'queue',
   })
+  resetPresentBubblePlaybackTracking(currentChatIntent.intentId)
 }))
 
 chatHookCleanups.push(onBeforeSend(async () => {
@@ -479,8 +701,12 @@ chatHookCleanups.push(onBeforeSend(async () => {
 
 chatHookCleanups.push(onTokenLiteral(async (literal) => {
   currentChatIntent?.writeLiteral(literal)
+
+  if (shouldSyncPresentBubbleWithPlayback())
+    return
+
   try {
-    postPresent({ type: 'assistant-append', text: literal })
+    postPresent({ type: 'assistant-append', text: literal, mode: 'stream-sentence' })
   }
   catch (error) {
     console.warn('[Stage] Failed to post present append (channel may be closed)', { error })
@@ -498,6 +724,12 @@ chatHookCleanups.push(onStreamEnd(async () => {
 }))
 
 chatHookCleanups.push(onAssistantResponseEnd(async (_message) => {
+  if (shouldSyncPresentBubbleWithPlayback()) {
+    currentChatIntent?.end()
+    currentChatIntent = null
+    return
+  }
+
   try {
     postPresent({ type: 'assistant-complete' })
   }

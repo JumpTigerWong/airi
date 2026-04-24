@@ -78,7 +78,7 @@ watch([targets, () => props.animator], ([targets, animator]) => {
       v-for="(grapheme, index) in targets"
       :key="index"
       ref="elements"
-      class="inline-block color-primary-400 dark:color-primary-100"
+      class="inline-block whitespace-pre color-primary-400 dark:color-primary-100"
       :class="[...(typeof props.textClass === 'string' ? [props.textClass] : (props.textClass || []))]"
     >
       {{ grapheme }}

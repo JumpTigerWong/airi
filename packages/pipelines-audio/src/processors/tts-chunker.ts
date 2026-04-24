@@ -10,6 +10,21 @@ export const TTS_FLUSH_INSTRUCTION = '\u200B'
 export const TTS_SPECIAL_TOKEN = '\u2063'
 
 const regexpAnySingleDigit = /\d/
+const leadingSentenceOpeners = new Set(['"', '\'', '“', '‘', '（', '【', '《', '「', '『'])
+const trailingSentenceClosers = new Set([
+  '"',
+  '\'',
+  ')',
+  ']',
+  '}',
+  '\u201D',
+  '\u2019',
+  '\uFF09',
+  '\u3011',
+  '\u300B',
+  '\u300D',
+  '\u300F',
+])
 
 const keptPunctuations = new Set('?？!！')
 const hardPunctuations = new Set('.。?？!！…⋯～~\n\t\r')
@@ -31,6 +46,23 @@ export interface TtsChunkItem {
   chunk: string
   special: string | null
   reason: 'boost' | 'limit' | 'hard' | 'flush' | 'special'
+}
+
+function takeTrailingSentenceClosers(
+  iterator: AsyncIterator<string>,
+  initialCurrent: IteratorResult<string, any> | undefined,
+): Promise<{ suffix: string, nextCurrent: IteratorResult<string, any> | undefined }> {
+  return (async () => {
+    let suffix = ''
+    let nextCurrent = initialCurrent
+
+    while (nextCurrent && !nextCurrent.done && trailingSentenceClosers.has(nextCurrent.value)) {
+      suffix += nextCurrent.value
+      nextCurrent = await iterator.next()
+    }
+
+    return { suffix, nextCurrent }
+  })()
 }
 
 export async function* chunkTtsInput(
@@ -66,6 +98,7 @@ export async function* chunkTtsInput(
 
   while (!current.done) {
     let value = current.value
+    let nextCurrentAfterTrailingClosers: IteratorResult<string, any> | undefined
 
     if (value.length > 1) {
       previousValue = value
@@ -127,7 +160,7 @@ export async function* chunkTtsInput(
       const words = [...segmenter.segment(buffer)].filter(w => w.isWordLike)
 
       if (chunkWordsCount > minimumWords && chunkWordsCount + words.length > maximumWords) {
-        const text = kept ? chunk.trim() + value : chunk.trim()
+        const text = kept ? chunk + value : chunk
         yield {
           text,
           words: chunkWordsCount,
@@ -143,7 +176,7 @@ export async function* chunkTtsInput(
       buffer = ''
 
       if (special) {
-        const text = chunk.slice(0, -1).trim()
+        const text = chunk.slice(0, -1)
         yield {
           text,
           words: chunkWordsCount,
@@ -154,7 +187,15 @@ export async function* chunkTtsInput(
         chunkWordsCount = 0
       }
       else if (flush || hard || chunkWordsCount > maximumWords || yieldCount < boost) {
-        const text = chunk.trim()
+        let trailingCloserSuffix = ''
+
+        if (hard || flush) {
+          const trailingClosers = await takeTrailingSentenceClosers(iterator, await iterator.next())
+          trailingCloserSuffix = trailingClosers.suffix
+          nextCurrentAfterTrailingClosers = trailingClosers.nextCurrent
+        }
+
+        const text = `${chunk}${trailingCloserSuffix}`
         yield {
           text,
           words: chunkWordsCount,
@@ -177,6 +218,9 @@ export async function* chunkTtsInput(
           next = undefined
         }
       }
+      else if (nextCurrentAfterTrailingClosers !== undefined) {
+        current = nextCurrentAfterTrailingClosers
+      }
       else {
         current = await iterator.next()
       }
@@ -193,7 +237,7 @@ export async function* chunkTtsInput(
   // eslint-disable-next-line no-console
   console.debug('while loop ends, chunk/buffer:', chunk, buffer)
   if (chunk.length > 0 || buffer.length > 0) {
-    const text = (chunk + buffer).trim()
+    const text = chunk + buffer
     yield {
       text,
       words: chunkWordsCount + [...segmenter.segment(buffer)].filter(w => w.isWordLike).length,
@@ -208,25 +252,69 @@ export async function chunkEmitter(
   options: TtsInputChunkOptions | undefined,
   handler: (ttsSegment: TtsChunkItem) => Promise<void> | void,
 ) {
+  const isOnlyFromSet = (text: string, set: Set<string>) => {
+    const normalizedText = text.trim()
+    return normalizedText.length > 0 && [...normalizedText].every(character => set.has(character))
+  }
+
   const sanitizeChunk = (text: string) =>
     text
       .replaceAll(TTS_SPECIAL_TOKEN, '')
       .replaceAll(TTS_FLUSH_INSTRUCTION, '')
-      .trim()
+
+  let pendingLeadingOpeners = ''
+  let bufferedChunk: TtsChunkItem | null = null
+
+  const flushBufferedChunk = async () => {
+    if (!bufferedChunk)
+      return
+
+    await handler(bufferedChunk)
+    bufferedChunk = null
+  }
 
   try {
     for await (const chunk of chunkTtsInput(reader, options)) {
-      // TODO: remove later
-
       if (chunk.reason === 'special') {
+        await flushBufferedChunk()
         const specialToken = pendingSpecials.shift()
-        // console.debug("special yield:", specialToken)
         await handler({ chunk: sanitizeChunk(chunk.text), special: specialToken ?? null, reason: chunk.reason })
       }
       else {
-        await handler({ chunk: sanitizeChunk(chunk.text), special: null, reason: chunk.reason })
+        const sanitizedChunkText = sanitizeChunk(chunk.text)
+        const normalizedChunkText = sanitizedChunkText.trim()
+        if (!normalizedChunkText)
+          continue
+
+        if (isOnlyFromSet(normalizedChunkText, leadingSentenceOpeners)) {
+          pendingLeadingOpeners += normalizedChunkText
+          continue
+        }
+
+        if (isOnlyFromSet(normalizedChunkText, trailingSentenceClosers) && bufferedChunk) {
+          bufferedChunk = { ...bufferedChunk, chunk: `${bufferedChunk.chunk}${normalizedChunkText}` }
+          continue
+        }
+
+        if (isOnlyFromSet(normalizedChunkText, trailingSentenceClosers) && !bufferedChunk) {
+          pendingLeadingOpeners += normalizedChunkText
+          continue
+        }
+
+        const mergedChunkText = `${pendingLeadingOpeners}${sanitizedChunkText}`
+        pendingLeadingOpeners = ''
+
+        await flushBufferedChunk()
+        bufferedChunk = { chunk: mergedChunkText, special: null, reason: chunk.reason }
       }
     }
+
+    if (pendingLeadingOpeners && bufferedChunk) {
+      bufferedChunk = { ...bufferedChunk, chunk: `${bufferedChunk.chunk}${pendingLeadingOpeners}` }
+      pendingLeadingOpeners = ''
+    }
+
+    await flushBufferedChunk()
   }
   catch (e) {
     console.error('Error chunking stream to TTS queue:', e)
